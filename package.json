@@ -1,0 +1,29 @@
+{
+  "name": "obsidian-koofr-sync",
+  "version": "0.1.0",
+  "description": "Sync your Obsidian vault to Koofr (or any WebDAV server) with smart conflict handling and safety guards.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "sync",
+    "webdav",
+    "koofr"
+  ],
+  "author": "Shidiq Hidayat",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "node-diff3": "^3.1.2"
+  }
+}
