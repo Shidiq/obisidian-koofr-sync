@@ -10,6 +10,19 @@ Sync your Obsidian vault to [Koofr](https://koofr.eu) (or any WebDAV server). A 
 - **Dry run** command that prints the full sync plan to the developer console without changing anything.
 - Works on mobile too (all HTTP goes through Obsidian's `requestUrl`, which bypasses CORS).
 
+## Install
+
+Not in the community plugin store. Install with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
+
+1. Install the **BRAT** plugin from the community store and enable it.
+2. Command palette → **BRAT: Add a beta plugin for testing**.
+3. Paste `Shidiq/obisidian-koofr-sync` (note the repo name spelling) and choose the latest version.
+4. Enable **Koofr Sync** in Settings → Community plugins.
+
+BRAT will pull new releases automatically. To update by hand: **BRAT: Check for updates to all beta plugins**.
+
+Manual install instead: download `main.js` and `manifest.json` from the [latest release](https://github.com/Shidiq/obisidian-koofr-sync/releases/latest) into `<vault>/.obsidian/plugins/koofr-sync/`, then reload Obsidian.
+
 ## Setup
 
 1. In Koofr: **Preferences → Password → App passwords → Add new** — never use your account password.
@@ -36,8 +49,8 @@ Each file's state at the last successful sync is recorded (local mtime/size, rem
 After each successful sync of a small text file (`.md .txt .json .csv .canvas`, ≤ 1 MB) its content is cached as a merge base. On conflict:
 
 1. If both sides are byte-identical → nothing to do.
-2. If a merge base exists → 3-way merge. Non-overlapping edits merge cleanly; overlapping edits produce git-style `<<<<<<< local / ======= / >>>>>>> remote` markers and a notification.
-3. Otherwise (binary, large, or first-ever sync) → both versions are kept, on both sides.
+2. Small text files → 3-way merge. Non-overlapping edits merge cleanly; overlapping edits produce git-style `<<<<<<< local / ======= / >>>>>>> remote` markers and a notification. With no cached base (first sync, or a cache that was cleared) the merge runs against an empty base, so a side that is empty loses cleanly instead of overwriting the other.
+3. Binary or large files → both versions are kept, on both sides.
 
 ## Notes & limitations
 
@@ -59,4 +72,17 @@ Then link the plugin folder into a vault:
 
 ```
 New-Item -ItemType Junction -Path "<vault>\.obsidian\plugins\koofr-sync" -Target "<this repo>"
+```
+
+### Cutting a release
+
+Releases are built by `.github/workflows/release.yml`: pushing a tag builds the plugin and publishes a GitHub release with `main.js`, `manifest.json`, and `versions.json` attached — the three files BRAT looks for.
+
+The tag must match `manifest.json`'s version exactly, with no `v` prefix (the workflow fails otherwise):
+
+```
+# bump "version" in manifest.json and package.json, add the entry to versions.json
+git commit -am "chore: release 0.1.2"
+git tag 0.1.2
+git push && git push --tags
 ```
