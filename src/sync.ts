@@ -362,12 +362,13 @@ export class SyncEngine {
         break;
     }
 
-    const base = this.deps.baseCache.get(path);
+    // No cached base (e.g. first sync) → merge against an empty base: whichever
+    // side is empty loses cleanly, overlapping content gets conflict markers.
+    const base = this.deps.baseCache.get(path) ?? "";
     const mergeable =
       isMergeableTextPath(path) &&
       localData.byteLength <= MAX_MERGE_SIZE &&
-      remoteData.byteLength <= MAX_MERGE_SIZE &&
-      base !== undefined;
+      remoteData.byteLength <= MAX_MERGE_SIZE;
 
     if (mergeable) {
       const decoder = new TextDecoder("utf-8");
