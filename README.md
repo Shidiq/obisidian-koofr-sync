@@ -4,7 +4,7 @@ Sync your Obsidian vault to [Koofr](https://koofr.eu) (or any WebDAV server). A 
 
 - **Check connectivity** — verify your WebDAV URL and credentials from settings.
 - **Regex paths to ignore** — one regex per line; matching paths are skipped in both directions.
-- **Smart Conflict** — when a file changed on both sides: small text files get a true 3-way merge (git-style conflict markers only when edits overlap); binary or large files keep both copies (`note (conflict 2026-07-27 1532).md`).
+- **Smart Conflict** — when a file changed on both sides: small text files get a true 3-way merge (only overlapping edits produce a conflict block — in `.md` the remote version lands in a ` ```new ` fenced block below your text, other text files get git-style markers); binary or large files keep both copies (`note (conflict 2026-07-27 1532).md`).
 - **Abort sync if modification above percentage** — if more than N% of your files would be deleted or overwritten, the sync aborts before touching anything. A sync that would delete *every* local file always aborts.
 - Manual sync (ribbon icon / command), optional auto-sync every N minutes, optional sync on startup.
 - **Dry run** command that prints the full sync plan to the developer console without changing anything.
@@ -49,7 +49,7 @@ Each file's state at the last successful sync is recorded (local mtime/size, rem
 After each successful sync of a small text file (`.md .txt .json .csv .canvas`, ≤ 1 MB) its content is cached as a merge base. On conflict:
 
 1. If both sides are byte-identical → nothing to do.
-2. Small text files → 3-way merge. Non-overlapping edits merge cleanly; overlapping edits produce git-style `<<<<<<< local / ======= / >>>>>>> remote` markers and a notification. With no cached base (first sync, or a cache that was cleared) the merge runs against an empty base, so a side that is empty loses cleanly instead of overwriting the other.
+2. Small text files → 3-way merge. Non-overlapping edits merge cleanly; overlapping edits produce a conflict block and a notification. In `.md` files your local text stays inline and the remote version follows in a fenced ` ```new ` code block, so the note stays readable — pick one and delete the other. Other text files get git-style `<<<<<<< local / ======= / >>>>>>> remote` markers. With no cached base (first sync, or a cache that was cleared) the merge runs against an empty base, so a side that is empty loses cleanly instead of overwriting the other.
 3. Binary or large files → both versions are kept, on both sides.
 
 ## Notes & limitations

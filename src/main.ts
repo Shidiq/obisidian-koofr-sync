@@ -188,7 +188,7 @@ export default class KoofrSyncPlugin extends Plugin {
       }
       if (c.mergedWithMarkers.length > 0) {
         new Notice(
-          `Koofr Sync: conflict markers written in:\n${c.mergedWithMarkers.join("\n")}`,
+          `Koofr Sync: conflicts written into:\n${c.mergedWithMarkers.join("\n")}`,
           0
         );
       }

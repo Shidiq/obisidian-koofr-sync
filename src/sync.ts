@@ -372,7 +372,8 @@ export class SyncEngine {
 
     if (mergeable) {
       const decoder = new TextDecoder("utf-8");
-      const outcome = threeWayMerge(decoder.decode(localData), base, decoder.decode(remoteData));
+      const style = path.toLowerCase().endsWith(".md") ? "mdFence" : "markers";
+      const outcome = threeWayMerge(decoder.decode(localData), base, decoder.decode(remoteData), style);
       const mergedBuf = new TextEncoder().encode(outcome.text).buffer as ArrayBuffer;
       const entry = await writeLocal(app, path, mergedBuf, null);
       await this.doUpload(path, entry);
