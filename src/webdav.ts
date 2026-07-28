@@ -9,6 +9,16 @@ export class WebDavError extends Error {
   }
 }
 
+/**
+ * Statuses worth retrying. 423 is the important one on Koofr: it locks a folder for
+ * the duration of a write, so parallel writes into one folder get "Locked" back.
+ */
+const RETRY_STATUSES = new Set([423, 429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 5;
+const BASE_BACKOFF_MS = 400;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
@@ -18,6 +28,12 @@ const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8"?>
     <d:getlastmodified/>
   </d:prop>
 </d:propfind>`;
+
+/** Parent folder of a vault-relative path; "" means the remote base dir itself. */
+function parentDir(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
 
 function encodeSegments(path: string): string {
   return path
@@ -43,6 +59,26 @@ function statusMessage(status: number): string {
   }
 }
 
+/** Server bodies carry the real reason; keep a short slice of it in the error. */
+function bodySnippet(resp: RequestUrlResponse): string {
+  let text = "";
+  try {
+    text = (resp.text ?? "").replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+  if (!text) return "";
+  return ` — ${text.length > 200 ? text.slice(0, 200) + "…" : text}`;
+}
+
+function davError(method: string, resp: RequestUrlResponse, path: string): WebDavError {
+  return new WebDavError(
+    `${method} ${path || "/"} failed: ${statusMessage(resp.status)} (HTTP ${resp.status})${bodySnippet(resp)}`,
+    resp.status,
+    path
+  );
+}
+
 export interface ConnectivityResult {
   ok: boolean;
   message: string;
@@ -52,7 +88,9 @@ export class WebDavClient {
   private baseUrl: string; // full URL to the remote base dir, no trailing slash
   private basePathPrefix: string; // decoded pathname of baseUrl, used to strip hrefs
   private authHeader: string;
-  private knownDirs = new Set<string>();
+  private knownDirs = new Map<string, Promise<void>>();
+  // One in-flight write per remote folder — Koofr locks the folder while writing.
+  private dirLocks = new Map<string, Promise<unknown>>();
 
   constructor(webdavUrl: string, username: string, password: string, remoteBaseDir: string) {
     const root = webdavUrl.replace(/\/+$/, "");
@@ -70,19 +108,60 @@ export class WebDavClient {
     return `${this.baseUrl}/${enc}${isDir ? "/" : ""}`;
   }
 
+  /**
+   * One request, retried on transient failures (locked folder, throttling, 5xx,
+   * network errors). All verbs used here are idempotent, so replaying is safe.
+   */
   private async request(
     method: string,
     url: string,
     extraHeaders: Record<string, string> = {},
-    body?: string | ArrayBuffer
+    body?: string | ArrayBuffer,
+    attempts = MAX_ATTEMPTS
   ): Promise<RequestUrlResponse> {
-    return requestUrl({
-      url,
-      method,
-      headers: { Authorization: this.authHeader, ...extraHeaders },
-      body,
-      throw: false,
-    });
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let resp: RequestUrlResponse;
+      try {
+        resp = await requestUrl({
+          url,
+          method,
+          headers: { Authorization: this.authHeader, ...extraHeaders },
+          body,
+          throw: false,
+        });
+      } catch (e) {
+        lastError = e;
+        if (attempt === attempts) break;
+        await sleep(this.backoff(attempt));
+        continue;
+      }
+      if (!RETRY_STATUSES.has(resp.status) || attempt === attempts) return resp;
+      await sleep(this.backoff(attempt));
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Network error: ${String(lastError)}`);
+  }
+
+  /** Exponential backoff with jitter, so retries from parallel tasks spread out. */
+  private backoff(attempt: number): number {
+    return BASE_BACKOFF_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
+  }
+
+  /**
+   * Serialize writes that touch the same remote folder. Different folders still run
+   * in parallel, so overall concurrency is preserved.
+   */
+  private withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.dirLocks.get(dir) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const settled = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.dirLocks.set(dir, settled);
+    return run;
   }
 
   /** Convert a multistatus href into a vault-relative path ("" = the base dir itself). */
@@ -177,7 +256,7 @@ export class WebDavClient {
       "Content-Type": "application/xml; charset=utf-8",
     }, PROPFIND_BODY);
     if (resp.status === 404) throw new WebDavError("Not found", 404, dirPath);
-    if (resp.status !== 207) throw new WebDavError(statusMessage(resp.status), resp.status, dirPath);
+    if (resp.status !== 207) throw davError("PROPFIND", resp, dirPath);
     const self = dirPath.replace(/\/+$/, "");
     return this.parseMultistatus(resp.text).filter((e) => e.path !== self);
   }
@@ -214,25 +293,27 @@ export class WebDavClient {
   async getFile(path: string): Promise<ArrayBuffer> {
     const resp = await this.request("GET", this.urlFor(path));
     if (resp.status >= 200 && resp.status < 300) return resp.arrayBuffer;
-    throw new WebDavError(statusMessage(resp.status), resp.status, path);
+    throw davError("GET", resp, path);
   }
 
   async putFile(path: string, data: ArrayBuffer): Promise<void> {
     await this.mkcolForFile(path);
-    const resp = await this.request("PUT", this.urlFor(path), {
-      "Content-Type": "application/octet-stream",
-    }, data);
-    if (resp.status < 200 || resp.status >= 300) {
-      throw new WebDavError(statusMessage(resp.status), resp.status, path);
-    }
+    await this.withDirLock(parentDir(path), async () => {
+      const resp = await this.request("PUT", this.urlFor(path), {
+        "Content-Type": "application/octet-stream",
+      }, data);
+      if (resp.status < 200 || resp.status >= 300) throw davError("PUT", resp, path);
+    });
   }
 
   async deleteFile(path: string): Promise<void> {
-    const resp = await this.request("DELETE", this.urlFor(path));
-    // 404 = already gone, which is what we wanted
-    if (resp.status !== 404 && (resp.status < 200 || resp.status >= 300)) {
-      throw new WebDavError(statusMessage(resp.status), resp.status, path);
-    }
+    await this.withDirLock(parentDir(path), async () => {
+      const resp = await this.request("DELETE", this.urlFor(path));
+      // 404 = already gone, which is what we wanted
+      if (resp.status !== 404 && (resp.status < 200 || resp.status >= 300)) {
+        throw davError("DELETE", resp, path);
+      }
+    });
   }
 
   /** PROPFIND Depth 0 on a single file — used to capture the fresh etag after PUT. */
@@ -242,42 +323,50 @@ export class WebDavClient {
       "Content-Type": "application/xml; charset=utf-8",
     }, PROPFIND_BODY);
     if (resp.status === 404) return null;
-    if (resp.status !== 207) throw new WebDavError(statusMessage(resp.status), resp.status, path);
+    if (resp.status !== 207) throw davError("PROPFIND", resp, path);
     const entries = this.parseMultistatus(resp.text);
     return entries.length > 0 ? entries[0] : null;
   }
 
-  /** Ensure every parent collection of `filePath` exists (MKCOL chain, cached per client). */
+  /**
+   * Ensure every parent collection of `filePath` exists. Each MKCOL is memoized as a
+   * promise, so parallel uploads into one folder await a single MKCOL instead of
+   * firing duplicates the server would answer with a lock error.
+   */
   private async mkcolForFile(filePath: string): Promise<void> {
     const parts = filePath.split("/").filter((s) => s.length > 0);
     parts.pop(); // drop file name
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      if (this.knownDirs.has(current)) continue;
-      await this.mkcol(current);
-      this.knownDirs.add(current);
+      let pending = this.knownDirs.get(current);
+      if (!pending) {
+        const dir = current;
+        // MKCOL writes into the *parent*, so it takes the parent's lock.
+        pending = this.withDirLock(parentDir(dir), () => this.mkcol(dir));
+        this.knownDirs.set(dir, pending);
+        // A failed MKCOL must not be cached as done.
+        pending.catch(() => this.knownDirs.delete(dir));
+      }
+      await pending;
     }
   }
 
   /** Create the remote base dir chain itself (used on first sync). */
   async ensureBaseDir(): Promise<void> {
     const resp = await this.request("MKCOL", this.baseUrl + "/");
-    if (![201, 200, 405, 301].includes(resp.status)) {
-      throw new WebDavError(statusMessage(resp.status), resp.status, "");
-    }
+    if (![201, 200, 405, 301].includes(resp.status)) throw davError("MKCOL", resp, "");
   }
 
   private async mkcol(dirPath: string): Promise<void> {
     const resp = await this.request("MKCOL", this.urlFor(dirPath, true));
     // 405 = already exists; 409 = parent missing (shouldn't happen given the ordered chain)
-    if (![201, 200, 405].includes(resp.status)) {
-      throw new WebDavError(statusMessage(resp.status), resp.status, dirPath);
-    }
+    if (![201, 200, 405].includes(resp.status)) throw davError("MKCOL", resp, dirPath);
   }
 
   /** Called at the start of each sync run so stale dir knowledge doesn't linger. */
   resetDirCache(): void {
     this.knownDirs.clear();
+    this.dirLocks.clear();
   }
 }

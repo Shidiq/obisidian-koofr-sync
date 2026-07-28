@@ -175,8 +175,14 @@ export default class KoofrSyncPlugin extends Plugin {
       const summary = parts.length ? parts.join(", ") : "no changes";
 
       if (result.failures.length > 0) {
-        console.warn("[koofr-sync] failed items:", result.failures);
-        new Notice(`Koofr Sync finished with errors: ${summary}. Details in the developer console.`, 10000);
+        for (const f of result.failures) console.error(`[koofr-sync] ${f.path}: ${f.error}`);
+        const first = result.failures[0];
+        const more = result.failures.length > 1 ? ` (+${result.failures.length - 1} more)` : "";
+        new Notice(
+          `Koofr Sync finished with errors: ${summary}.\n${first.path}: ${first.error}${more}\n` +
+            `Full list in the developer console.`,
+          15000
+        );
       } else if (interactive || parts.length > 0) {
         new Notice(`Koofr Sync: ${summary}.`);
       }
