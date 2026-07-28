@@ -1,7 +1,7 @@
 {
   "id": "koofr-sync",
   "name": "Koofr Sync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.4.0",
   "description": "Sync your vault to Koofr (or any WebDAV server) with smart conflict handling, regex ignore paths, and safety guards.",
   "author": "Shidiq Hidayat",
