@@ -15,6 +15,12 @@ export class WebDavError extends Error {
  */
 const RETRY_STATUSES = new Set([423, 429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 5;
+/**
+ * Stop uploading for the rest of a run once this many PUTs have failed and none
+ * has succeeded. A failed PUT on Koofr still truncates
+ * the remote file to 0 bytes, so every further attempt empties another remote copy.
+ */
+const PUT_BREAKER_THRESHOLD = 3;
 const BASE_BACKOFF_MS = 400;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -71,9 +77,21 @@ function bodySnippet(resp: RequestUrlResponse): string {
   return ` — ${text.length > 200 ? text.slice(0, 200) + "…" : text}`;
 }
 
+/**
+ * Koofr's WebDAV (Go x/net/webdav) answers a PUT it cannot store with 404 (failed to
+ * open the file) or 405 (failed to write it), so on PUT both mean "the server could
+ * not save the file", not a missing path or a bad verb.
+ */
+function methodStatusMessage(method: string, status: number): string {
+  if (method === "PUT" && (status === 404 || status === 405)) {
+    return "Server could not store the file — check that uploading works in the Koofr web app";
+  }
+  return statusMessage(status);
+}
+
 function davError(method: string, resp: RequestUrlResponse, path: string): WebDavError {
   return new WebDavError(
-    `${method} ${path || "/"} failed: ${statusMessage(resp.status)} (HTTP ${resp.status})${bodySnippet(resp)}`,
+    `${method} ${path || "/"} failed: ${methodStatusMessage(method, resp.status)} (HTTP ${resp.status})${bodySnippet(resp)}`,
     resp.status,
     path
   );
@@ -91,6 +109,8 @@ export class WebDavClient {
   private knownDirs = new Map<string, Promise<void>>();
   // One in-flight write per remote folder — Koofr locks the folder while writing.
   private dirLocks = new Map<string, Promise<unknown>>();
+  private putFailures = 0;
+  private putSuccesses = 0;
 
   constructor(webdavUrl: string, username: string, password: string, remoteBaseDir: string) {
     const root = webdavUrl.replace(/\/+$/, "");
@@ -297,13 +317,30 @@ export class WebDavClient {
   }
 
   async putFile(path: string, data: ArrayBuffer): Promise<void> {
+    this.checkPutBreaker(path);
     await this.mkcolForFile(path);
     await this.withDirLock(parentDir(path), async () => {
+      this.checkPutBreaker(path);
       const resp = await this.request("PUT", this.urlFor(path), {
         "Content-Type": "application/octet-stream",
       }, data);
-      if (resp.status < 200 || resp.status >= 300) throw davError("PUT", resp, path);
+      if (resp.status >= 200 && resp.status < 300) {
+        this.putSuccesses++;
+        return;
+      }
+      this.putFailures++;
+      throw davError("PUT", resp, path);
     });
+  }
+
+  private checkPutBreaker(path: string): void {
+    if (this.putSuccesses === 0 && this.putFailures >= PUT_BREAKER_THRESHOLD) {
+      throw new WebDavError(
+        `PUT ${path} skipped: the server rejected the first ${this.putFailures} uploads of this run, so no more were attempted`,
+        null,
+        path
+      );
+    }
   }
 
   async deleteFile(path: string): Promise<void> {
@@ -368,5 +405,7 @@ export class WebDavClient {
   resetDirCache(): void {
     this.knownDirs.clear();
     this.dirLocks.clear();
+    this.putFailures = 0;
+    this.putSuccesses = 0;
   }
 }
