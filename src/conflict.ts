@@ -93,6 +93,18 @@ export function conflictCopyName(path: string, when: Date, exists: (p: string) =
   return candidate;
 }
 
+/**
+ * A conflict where one side is a 0-byte file: keep the side with content.
+ * Nothing is lost, since the empty side has none. This also covers the remote
+ * file a failed PUT leaves behind (Koofr truncates before storing the body),
+ * which would otherwise be merged in as "remote deleted everything".
+ */
+export function emptySideWinner(localLen: number, remoteLen: number): "local" | "remote" | null {
+  if (localLen > 0 && remoteLen === 0) return "local";
+  if (localLen === 0 && remoteLen > 0) return "remote";
+  return null;
+}
+
 export function buffersEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
   if (a.byteLength !== b.byteLength) return false;
   const va = new Uint8Array(a);

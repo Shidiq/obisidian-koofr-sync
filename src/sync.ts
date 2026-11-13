@@ -10,7 +10,7 @@ import {
 } from "./types";
 import { WebDavClient } from "./webdav";
 import { BaseCache, MAX_MERGE_SIZE, isMergeableTextPath } from "./basecache";
-import { threeWayMerge, conflictCopyName, buffersEqual } from "./conflict";
+import { threeWayMerge, conflictCopyName, buffersEqual, emptySideWinner } from "./conflict";
 import { listLocal, readLocal, writeLocal, trashLocal } from "./localfs";
 import { isIgnored } from "./ignore";
 import { pLimit } from "./concurrency";
@@ -335,6 +335,18 @@ export class SyncEngine {
     if (buffersEqual(localData, remoteData)) {
       await this.doAdopt(path, local, remote);
       counts.adopted++;
+      return;
+    }
+
+    const winner = emptySideWinner(localData.byteLength, remoteData.byteLength);
+    if (winner === "local") {
+      await this.doUpload(path, local);
+      counts.uploaded++;
+      return;
+    }
+    if (winner === "remote") {
+      await this.doDownload(path, remote);
+      counts.downloaded++;
       return;
     }
 
